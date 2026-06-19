@@ -17,6 +17,7 @@ eggs/
 lib/
 lib64/
 parts/
+.pyc
 sdist/
 var/
 wheels/
@@ -216,3 +217,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
