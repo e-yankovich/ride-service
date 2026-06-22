@@ -1,10 +1,12 @@
 import os
+import json
 import pyodbc
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from datetime import datetime
 from typing import Optional
+from azure.servicebus import ServiceBusClient, ServiceBusMessage
 
 load_dotenv()
 
@@ -14,6 +16,7 @@ SCHEMA = "EvgeniyaYankovich"
 
 # RideStatus ENUM: 1=Scheduled, 2=InProgress, 3=Completed, 4=Cancelled
 VALID_STATUSES = {1, 2, 3, 4}
+STATUS_COMPLETED = 3
 
 
 def get_connection():
@@ -27,6 +30,24 @@ def get_connection():
         f"TrustServerCertificate=no;"
     )
     return pyodbc.connect(conn_str)
+
+
+def send_ride_completed_message(ride_id: str, driver_id: str, rating: int, comment: Optional[str], passenger_id: Optional[str]):
+    conn_str = os.getenv("SERVICE_BUS_SEND_CONNECTION_STRING")
+    queue_name = os.getenv("SERVICE_BUS_QUEUE_NAME")
+
+    body = json.dumps({
+        "rideId": ride_id,
+        "driverId": driver_id,
+        "rating": rating,
+        "comment": comment,
+        "passengerId": passenger_id,
+    })
+    message = ServiceBusMessage(body)
+
+    with ServiceBusClient.from_connection_string(conn_str) as client:
+        with client.get_queue_sender(queue_name) as sender:
+            sender.send_messages(message)
 
 
 def create_schema_and_table():
@@ -103,6 +124,9 @@ class BookingCreate(BaseModel):
 
 class StatusUpdate(BaseModel):
     rideStatus: int
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    passengerId: Optional[str] = None
 
 
 # ---------- Rides ----------
@@ -171,19 +195,32 @@ def update_status(ride_id: str, payload: StatusUpdate):
             status_code=400,
             detail="rideStatus must be one of 1 (Scheduled), 2 (InProgress), 3 (Completed), 4 (Cancelled)",
         )
+    if payload.rideStatus == STATUS_COMPLETED:
+        if payload.rating is None:
+            raise HTTPException(status_code=400, detail="rating is required when completing a ride")
+        if payload.rating < 1 or payload.rating > 5:
+            raise HTTPException(status_code=400, detail="rating must be between 1 and 5")
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(f"""
+    driver_id = cursor.execute(f"""
         UPDATE [{SCHEMA}].[Rides]
         SET Status = ?, UpdatedAt = GETDATE()
+        OUTPUT INSERTED.DriverId
         WHERE RideId = ?
-    """, payload.rideStatus, ride_id)
-    updated = cursor.rowcount
+    """, payload.rideStatus, ride_id).fetchval()
     conn.commit()
     cursor.close()
     conn.close()
-    if updated == 0:
+    if driver_id is None:
         raise HTTPException(status_code=404, detail="Ride not found")
+
+    if payload.rideStatus == STATUS_COMPLETED:
+        try:
+            send_ride_completed_message(ride_id, str(driver_id), payload.rating, payload.comment, payload.passengerId)
+        except Exception as e:
+            # status is already persisted; a queue failure must not break the response
+            print(f"Failed to send ride completed message for {ride_id}: {e}")
+
     return {"rideId": ride_id, "rideStatus": payload.rideStatus, "action": "updated"}
 
 

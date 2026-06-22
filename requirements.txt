@@ -2,3 +2,4 @@ fastapi
 uvicorn
 pyodbc
 python-dotenv
+azure-servicebus
