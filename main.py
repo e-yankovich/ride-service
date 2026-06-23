@@ -1,6 +1,7 @@
 import os
 import json
 import pyodbc
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -17,6 +18,17 @@ SCHEMA = "EvgeniyaYankovich"
 # RideStatus ENUM: 1=Scheduled, 2=InProgress, 3=Completed, 4=Cancelled
 VALID_STATUSES = {1, 2, 3, 4}
 STATUS_COMPLETED = 3
+
+DRIVER_SERVICE_URL = "http://localhost:8002"
+
+
+def validate_driver(driver_id: str):
+    try:
+        response = httpx.get(f"{DRIVER_SERVICE_URL}/drivers/{driver_id}")
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="DriverService unavailable")
+    if response.status_code == 404:
+        raise HTTPException(status_code=400, detail="Driver not found")
 
 
 def get_connection():
@@ -133,6 +145,7 @@ class StatusUpdate(BaseModel):
 
 @app.post("/rides")
 def create_ride(ride: RideCreate):
+    validate_driver(ride.driverId)
     conn = get_connection()
     cursor = conn.cursor()
     new_id = cursor.execute(f"""
