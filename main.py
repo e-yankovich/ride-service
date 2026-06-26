@@ -16,8 +16,18 @@ app = FastAPI()
 SCHEMA = "EvgeniyaYankovich"
 
 # RideStatus ENUM: 1=Scheduled, 2=InProgress, 3=Completed, 4=Cancelled
-VALID_STATUSES = {1, 2, 3, 4}
+STATUS_SCHEDULED = 1
+STATUS_IN_PROGRESS = 2
 STATUS_COMPLETED = 3
+STATUS_CANCELLED = 4
+VALID_STATUSES = {STATUS_SCHEDULED, STATUS_IN_PROGRESS, STATUS_COMPLETED, STATUS_CANCELLED}
+
+ALLOWED_TRANSITIONS = {
+    STATUS_SCHEDULED: {STATUS_IN_PROGRESS, STATUS_COMPLETED, STATUS_CANCELLED},
+    STATUS_IN_PROGRESS: {STATUS_COMPLETED, STATUS_CANCELLED},
+    STATUS_COMPLETED: set(),
+    STATUS_CANCELLED: set(),
+}
 
 DRIVER_SERVICE_URL = os.getenv("DRIVER_SERVICE_URL", "http://localhost:8002")
 
@@ -145,6 +155,10 @@ class StatusUpdate(BaseModel):
 
 @app.post("/rides")
 def create_ride(ride: RideCreate):
+    now = datetime.now(ride.departureTime.tzinfo) if ride.departureTime.tzinfo else datetime.now()
+    if ride.departureTime < now:
+        raise HTTPException(status_code=400, detail="departureTime cannot be in the past")
+
     validate_driver(ride.driverId)
     conn = get_connection()
     cursor = conn.cursor()
@@ -213,25 +227,46 @@ def update_status(ride_id: str, payload: StatusUpdate):
             raise HTTPException(status_code=400, detail="rating is required when completing a ride")
         if payload.rating < 1 or payload.rating > 5:
             raise HTTPException(status_code=400, detail="rating must be between 1 and 5")
+
     conn = get_connection()
     cursor = conn.cursor()
-    driver_id = cursor.execute(f"""
+
+    cursor.execute(
+        f"SELECT Status, DriverId FROM [{SCHEMA}].[Rides] WHERE RideId = ?", ride_id
+    )
+    row = cursor.fetchone()
+    if row is None:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Ride not found")
+
+    current_status, driver_id = row[0], row[1]
+    if payload.rideStatus not in ALLOWED_TRANSITIONS.get(current_status, set()):
+        cursor.close()
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot change ride status from {current_status} to {payload.rideStatus}",
+        )
+
+    cursor.execute(f"""
         UPDATE [{SCHEMA}].[Rides]
         SET Status = ?, UpdatedAt = GETDATE()
-        OUTPUT INSERTED.DriverId
         WHERE RideId = ?
-    """, payload.rideStatus, ride_id).fetchval()
+    """, payload.rideStatus, ride_id)
+
+    # Cancelling a ride closes all of its bookings; the seats go away with the ride.
+    if payload.rideStatus == STATUS_CANCELLED:
+        cursor.execute(f"DELETE FROM [{SCHEMA}].[Bookings] WHERE RideId = ?", ride_id)
+
     conn.commit()
     cursor.close()
     conn.close()
-    if driver_id is None:
-        raise HTTPException(status_code=404, detail="Ride not found")
 
     if payload.rideStatus == STATUS_COMPLETED:
         try:
             send_ride_completed_message(ride_id, str(driver_id), payload.rating, payload.comment, payload.passengerId)
         except Exception as e:
-            # status is already persisted; a queue failure must not break the response
             print(f"Failed to send ride completed message for {ride_id}: {e}")
 
     return {"rideId": ride_id, "rideStatus": payload.rideStatus, "action": "updated"}
@@ -248,7 +283,8 @@ def create_booking(ride_id: str, booking: BookingCreate):
     cursor = conn.cursor()
 
     cursor.execute(
-        f"SELECT SeatsAvailable FROM [{SCHEMA}].[Rides] WHERE RideId = ?", ride_id
+        f"SELECT SeatsAvailable, Status, DepartureTime FROM [{SCHEMA}].[Rides] WHERE RideId = ?",
+        ride_id,
     )
     row = cursor.fetchone()
     if row is None:
@@ -256,7 +292,18 @@ def create_booking(ride_id: str, booking: BookingCreate):
         conn.close()
         raise HTTPException(status_code=404, detail="Ride not found")
 
-    seats_available = row[0]
+    seats_available, status, departure_time = row[0], row[1], row[2]
+
+    if status != STATUS_SCHEDULED:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Ride is not open for booking")
+
+    if departure_time is not None and departure_time < datetime.now():
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=409, detail="Ride has already departed")
+
     if seats_available < booking.seatsRequested:
         cursor.close()
         conn.close()
