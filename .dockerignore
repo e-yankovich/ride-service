@@ -1,0 +1,13 @@
+.env
+.git
+.gitignore
+.idea
+.venv
+venv/
+env/
+__pycache__/
+*.pyc
+test_main.py
+azure-pipelines.yml
+Dockerfile
+.dockerignore

@@ -19,7 +19,7 @@ SCHEMA = "EvgeniyaYankovich"
 VALID_STATUSES = {1, 2, 3, 4}
 STATUS_COMPLETED = 3
 
-DRIVER_SERVICE_URL = "http://localhost:8002"
+DRIVER_SERVICE_URL = os.getenv("DRIVER_SERVICE_URL", "http://localhost:8002")
 
 
 def validate_driver(driver_id: str):
