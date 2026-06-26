@@ -1,0 +1,61 @@
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  pythonVersion: '3.13'
+
+stages:
+- stage: SyntaxCheck
+  displayName: 'Syntax check'
+  jobs:
+  - job: Compile
+    displayName: 'Compile Python sources'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m compileall -q .
+      displayName: 'py_compile all .py files'
+
+- stage: Test
+  displayName: 'Run tests'
+  dependsOn: SyntaxCheck
+  condition: succeeded()
+  jobs:
+  - job: Pytest
+    displayName: 'Run unit tests'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt pytest
+      displayName: 'Install dependencies'
+
+    - script: |
+        python -m pytest --junitxml=$(Build.ArtifactStagingDirectory)/test-results.xml
+      displayName: 'Run pytest'
+
+    - task: PublishTestResults@2
+      condition: always()
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '$(Build.ArtifactStagingDirectory)/test-results.xml'
+        testRunTitle: 'ride-service unit tests'
+      displayName: 'Publish test results'
+
+    - task: PublishBuildArtifacts@1
+      condition: always()
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/test-results.xml'
+        ArtifactName: 'test-results'
+      displayName: 'Publish test results artifact'
